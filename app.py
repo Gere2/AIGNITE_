@@ -375,8 +375,8 @@ def main():
         st.markdown("## <span class='emoji'>📖</span> Guías y Manuales", unsafe_allow_html=True)
         st.write("Descarga los documentos de instalación y usuario para AIGNITE.")
         docs = {
-            "🛠️ Guía de Instalación":   "Guia de instalacion AIGNITE.pdf",
-            "📄 Guía de Usuario":       "Guia de usuario AIGNITE.pdf"
+            "🛠️ Guía de Instalación":   "Guia_Instalacion_AIGNITE.pdf",
+            "📄 Guía de Usuario":       "Guia_Usuario_AIGNITE.pdf"
         }
         cols = st.columns(len(docs), gap="large")
         for (label, filename), col in zip(docs.items(), cols):
