@@ -1,15 +1,11 @@
 # database.py
 
 import sqlite3
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 DB_PATH = "incendios.db"
 
 def init_db():
-    """
-    Crea la base de datos y la tabla registros_incendios
-    si no existen todavía.
-    """
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -31,40 +27,51 @@ def init_db():
     conn.commit()
     conn.close()
 
-def log_prediction(inputs: Dict, risk: str, proba: List[float]):
-    """
-    Inserta un nuevo registro de predicción en la tabla.
-    inputs: dict con las mismas claves que usas en tu app (HEAT_SOURC, TYPE_MAT, …)
-    risk:       'Bajo'|'Medio'|'Alto'
-    proba:      lista de tres floats con las probabilidades para Bajo/Medio/Alto
-    """
+def log_prediction(inputs: Dict, risk: str, proba: List[float], id_manual: Optional[int] = None):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO registros_incendios
-        (HEAT_SOURC, TYPE_MAT, STRUC_STAT, DETECTOR, DET_TYPE, AREA,
-         RISK, prob_bajo, prob_medio, prob_alto)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        inputs["HEAT_SOURC"],
-        inputs["TYPE_MAT"],
-        inputs["STRUC_STAT"],
-        inputs["DETECTOR"],
-        inputs["DET_TYPE"],
-        inputs["AREA"],
-        risk,
-        proba[0],
-        proba[1],
-        proba[2],
-    ))
+    if id_manual is not None and id_manual > 0:
+        # reemplaza o inserta con ID concreto
+        cursor.execute('''
+            INSERT OR REPLACE INTO registros_incendios
+            (id, HEAT_SOURC, TYPE_MAT, STRUC_STAT, DETECTOR, DET_TYPE, AREA,
+             RISK, prob_bajo, prob_medio, prob_alto)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            id_manual,
+            inputs["HEAT_SOURC"],
+            inputs["TYPE_MAT"],
+            inputs["STRUC_STAT"],
+            inputs["DETECTOR"],
+            inputs["DET_TYPE"],
+            inputs["AREA"],
+            risk,
+            proba[0],
+            proba[1],
+            proba[2],
+        ))
+    else:
+        # autoincremental
+        cursor.execute('''
+            INSERT INTO registros_incendios
+            (HEAT_SOURC, TYPE_MAT, STRUC_STAT, DETECTOR, DET_TYPE, AREA,
+             RISK, prob_bajo, prob_medio, prob_alto)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            inputs["HEAT_SOURC"],
+            inputs["TYPE_MAT"],
+            inputs["STRUC_STAT"],
+            inputs["DETECTOR"],
+            inputs["DET_TYPE"],
+            inputs["AREA"],
+            risk,
+            proba[0],
+            proba[1],
+            proba[2],
+        ))
     conn.commit()
     conn.close()
-
 def fetch_logs() -> List[Dict]:
-    """
-    Lee todos los registros (más recientes primero) y los devuelve
-    como una lista de diccionarios.
-    """
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM registros_incendios ORDER BY timestamp DESC")

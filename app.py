@@ -3,7 +3,9 @@ import pandas as pd
 import joblib
 import sqlite3
 import os
+import numpy as np
 from database import init_db, log_prediction, fetch_logs
+from sklearn.metrics import classification_report, confusion_matrix
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURACIÓN GLOBAL DE PÁGINA Y ESTILOS
@@ -172,6 +174,69 @@ DET_TYPE_MAP = {
     'U': 'Undetermined'
 }
 
+
+
+def validar_codigo(inputs: dict) -> (bool, list):
+    errores = []
+    if inputs["HEAT_SOURC"] not in HEAT_SOURC_MAP:
+        errores.append(f"Fuente de calor inválida: {inputs['HEAT_SOURC']}")
+    if inputs["TYPE_MAT"] not in TYPE_MAT_MAP:
+        errores.append(f"Material combustible inválido: {inputs['TYPE_MAT']}")
+    if inputs["STRUC_STAT"] not in STRUC_STAT_MAP:
+        errores.append(f"Estado estructural inválido: {inputs['STRUC_STAT']}")
+    if inputs["DETECTOR"] not in DETECTOR_MAP:
+        errores.append(f"Detector inválido: {inputs['DETECTOR']}")
+    if inputs["DET_TYPE"] not in DET_TYPE_MAP:
+        errores.append(f"Tipo de detector inválido: {inputs['DET_TYPE']}")
+    return (len(errores) == 0, errores)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4) CARGA DEL MODELO
+# ─────────────────────────────────────────────────────────────────────────────
+@st.cache_resource
+def load_model():
+    bundle = joblib.load("models/aignite_model.pkl")
+    return bundle["model"], bundle["columns"], bundle["cat_cols"]
+
+clf, model_columns, cat_cols = load_model()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5) INTEGRACIÓN SHAP
+# ─────────────────────────────────────────────────────────────────────────────
+try:
+    import shap
+    import matplotlib.pyplot as plt
+    SHAP_AVAILABLE = True
+
+    @st.cache_resource
+    def load_explainer():
+        return shap.TreeExplainer(clf)
+
+    explainer = load_explainer()
+
+except ImportError:
+    SHAP_AVAILABLE = False
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6) FUNCIÓN DE PREDICCIÓN
+# ─────────────────────────────────────────────────────────────────────────────
+def predict(data: dict):
+    df = pd.DataFrame([data])
+    for c in cat_cols:
+        df[c] = df[c].astype(str)
+    df_enc = pd.get_dummies(df, columns=cat_cols).reindex(
+        columns=model_columns, fill_value=0
+    )
+    pred  = clf.predict(df_enc)[0]
+    proba = clf.predict_proba(df_enc)[0]
+    return pred, proba, df_enc
+
+RISK_STYLE = {
+    "Bajo":  {"func": st.success, "icon": "🟢"},
+    "Medio": {"func": st.warning, "icon": "🟡"},
+    "Alto":  {"func": st.error,   "icon": "🔴"}
+}
+
 def main():
     # ─────────────────────────────────────────────────────────────────────────
     # Inicializar base de datos y cargar modelo
@@ -179,11 +244,10 @@ def main():
     init_db()
 
     @st.cache_resource
-    def load_model():
-        bundle = joblib.load("models/aignite_model.pkl")
-        return bundle["model"], bundle["columns"], bundle["cat_cols"]
+    def load_explainer():
+        return shap.TreeExplainer(clf)
 
-    clf, model_columns, cat_cols = load_model()
+    explainer = load_explainer()
 
     def predict(data: dict):
         df = pd.DataFrame([data])
@@ -210,63 +274,138 @@ def main():
         "Explicabilidad", "Ayuda",
         "Dashboard", "Retrain"
     ])
-
     # ─────────────────────────────────────────────────────────────────────────
     # Página: Evaluar
     # ─────────────────────────────────────────────────────────────────────────
     if page == "Evaluar":
         st.markdown("## <span class='emoji'>🔥</span> Evaluar Riesgo", unsafe_allow_html=True)
-        st.write("Selecciona los parámetros y haz clic en **🔥 Evaluar riesgo**. Verás el resultado a la derecha.")
+        st.write(
+            "Selecciona los parámetros, opcionalmente el ID, y haz clic en **🔥 Evaluar riesgo**. Verás el resultado a la derecha.")
 
         col_inputs, col_results = st.columns([1, 2], gap="large")
 
         with col_inputs:
             st.markdown("### 🔧 Parámetros de evaluación")
-            heat_val = st.selectbox("Fuente de calor", list(HEAT_SOURC_MAP.keys()), key="ev1")
-            st.caption(f"📖 {HEAT_SOURC_MAP.get(heat_val, '')}")
 
-            mat_val = st.selectbox("Material combustible", list(TYPE_MAT_MAP.keys()), key="ev2")
-            st.caption(f"📖 {TYPE_MAT_MAP.get(mat_val, '')}")
+            # Fuente de calor
+            heat_val = st.selectbox(
+                "Fuente de calor",
+                list(HEAT_SOURC_MAP.keys()),
+                key="eval_heat"
+            )
+            st.caption(f"📖 {HEAT_SOURC_MAP[heat_val]}")
 
-            struct_val = st.selectbox("Estado estructural", list(STRUC_STAT_MAP.keys()), key="ev3")
-            st.caption(f"📖 {STRUC_STAT_MAP.get(struct_val, '')}")
+            # Material combustible (multiselect)
+            mat_vals = st.multiselect(
+                "Material combustible",
+                options=list(TYPE_MAT_MAP.keys()),
+                default=[list(TYPE_MAT_MAP.keys())[1]],
+                key="eval_mat"
+            )
+            if mat_vals:
+                st.caption("📖 " + ", ".join(TYPE_MAT_MAP[m] for m in mat_vals))
+            else:
+                st.caption("📖 Selecciona al menos un material")
 
-            det_val = st.selectbox("Detector presente", list(DETECTOR_MAP.keys()), key="ev4")
-            st.caption(f"📖 {DETECTOR_MAP.get(det_val, '')}")
+            # Estado estructural
+            struct_val = st.selectbox(
+                "Estado estructural",
+                list(STRUC_STAT_MAP.keys()),
+                key="eval_struct"
+            )
+            st.caption(f"📖 {STRUC_STAT_MAP[struct_val]}")
 
-            dtype_val = st.selectbox("Tipo de detector", list(DET_TYPE_MAP.keys()), key="ev5")
-            st.caption(f"📖 {DET_TYPE_MAP.get(dtype_val, '')}")
+            # Detector presente
+            det_val = st.selectbox(
+                "Detector presente",
+                list(DETECTOR_MAP.keys()),
+                key="eval_det"
+            )
+            st.caption(f"📖 {DETECTOR_MAP[det_val]}")
 
-            area_val = st.slider("Superficie (m²)", 1, 10000, 100, key="ev6")
+            # Tipo de detector
+            dtype_val = st.selectbox(
+                "Tipo de detector",
+                list(DET_TYPE_MAP.keys()),
+                key="eval_dtype"
+            )
+            st.caption(f"📖 {DET_TYPE_MAP[dtype_val]}")
 
-            evaluate = st.button("🔥 Evaluar riesgo")
+            # Área
+            area_val = st.slider(
+                "Superficie (m²)",
+                min_value=1,
+                max_value=10000,
+                value=100,
+                key="eval_area"
+            )
+
+            # ID manual (opcional)
+            id_manual = st.number_input(
+                "ID manual (opcional)",
+                min_value=0,
+                value=0,
+                step=1,
+                help="Si lo dejas a 0 se usará autoincremental",
+                key="eval_id"
+            )
+
+            evaluate = st.button("🔥 Evaluar riesgo", key="eval_btn")
 
         with col_results:
-            if evaluate:
+            if not evaluate:
+                st.info("Pulsa «🔥 Evaluar riesgo» para ver el resultado aquí.")
+            else:
+                # Preparamos inputs
                 inputs_eval = {
                     "HEAT_SOURC": heat_val,
-                    "TYPE_MAT":   mat_val,
+                    "TYPE_MAT": mat_vals[0] if mat_vals else None,
                     "STRUC_STAT": struct_val,
-                    "DETECTOR":   det_val,
-                    "DET_TYPE":   dtype_val,
-                    "AREA":       area_val
+                    "DETECTOR": det_val,
+                    "DET_TYPE": dtype_val,
+                    "AREA": area_val
                 }
-                risk, proba, _ = predict(inputs_eval)
-                log_prediction(inputs_eval, risk, proba)
 
-                st.markdown("<div class='result-card'>", unsafe_allow_html=True)
-                style = RISK_STYLE[risk]
-                style["func"](f"{style['icon']} Nivel de riesgo: **{risk}**")
-                st.write(
-                    f"🟢 Bajo: {proba[0]:.1%}  |  "
-                    f"🟡 Medio: {proba[1]:.1%}  |  "
-                    f"🔴 Alto: {proba[2]:.1%}"
-                )
-                if risk == "Bajo":
-                    st.balloons()
-                st.markdown("</div>", unsafe_allow_html=True)
-            else:
-                st.info("Pulsa «🔥 Evaluar riesgo» para ver el resultado aquí.")
+                # Validación
+                ok, errores = validar_codigo(inputs_eval)
+                if not mat_vals:
+                    col_results.error("Debes seleccionar al menos un material combustible.")
+                elif not ok:
+                    for err in errores:
+                        col_results.error(err)
+                else:
+                    # Si hay varios materiales, promediamos probas
+                    import numpy as np
+                    probas = []
+                    for m in mat_vals:
+                        inp = {**inputs_eval, "TYPE_MAT": m}
+                        _, p, _ = predict(inp)
+                        probas.append(p)
+                    avg_proba = np.mean(probas, axis=0)
+
+                    # Decidimos la clase final
+                    risk = clf.classes_[np.argmax(avg_proba)]
+
+                    # Logueamos, guardando todos los mats como CSV
+                    log_prediction(
+                        {**inputs_eval, "TYPE_MAT": ",".join(mat_vals)},
+                        risk,
+                        avg_proba,
+                        id_manual if id_manual > 0 else None
+                    )
+
+                    # Mostrar resultado
+                    st.markdown("<div class='result-card'>", unsafe_allow_html=True)
+                    style = RISK_STYLE[risk]
+                    style["func"](f"{style['icon']} Nivel de riesgo: **{risk}**")
+                    st.write(
+                        f"🟢 Bajo: {avg_proba[0]:.1%}  |  "
+                        f"🟡 Medio: {avg_proba[1]:.1%}  |  "
+                        f"🔴 Alto: {avg_proba[2]:.1%}"
+                    )
+                    if risk == "Bajo":
+                        st.balloons()
+                    st.markdown("</div>", unsafe_allow_html=True)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Página: CRUD
@@ -297,77 +436,104 @@ def main():
     elif page == "Histórico":
         st.markdown("## <span class='emoji'>📜</span> Histórico de Predicciones", unsafe_allow_html=True)
         logs = fetch_logs()
-        if logs:
-            st.dataframe(pd.DataFrame(logs))
-        else:
+        if not logs:
             st.write("No hay registros aún.")
+        else:
+            # Montamos el DataFrame y convertimos timestamp
+            df = pd.DataFrame(logs)
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+            # Sidebar de filtros
+            with st.sidebar.expander("🔍 Filtros del Historial", expanded=True):
+                # Filtrar por nivel de riesgo
+                niveles = st.multiselect(
+                    "Niveles de riesgo",
+                    options=["Bajo", "Medio", "Alto"],
+                    default=["Bajo", "Medio", "Alto"]
+                )
+                # Filtrar por rango de fechas
+                fechas = st.date_input(
+                    "Rango de fechas",
+                    value=[df["timestamp"].dt.date.min(), df["timestamp"].dt.date.max()]
+                )
+
+            # Aplicamos los filtros
+            mask = (
+                    df["RISK"].isin(niveles)
+                    & (df["timestamp"].dt.date >= fechas[0])
+                    & (df["timestamp"].dt.date <= fechas[1])
+            )
+            df_filtrado = df.loc[mask].sort_values("timestamp", ascending=False)
+
+            # Mostramos resultado
+            st.write(f"Mostrando {len(df_filtrado)} registros:")
+            st.dataframe(df_filtrado.reset_index(drop=True))
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Página: Explicabilidad
-    # ─────────────────────────────────────────────────────────────────────────
+    # --- Página: Explicabilidad ---
     elif page == "Explicabilidad":
         st.markdown("## <span class='emoji'>🔍</span> Explicabilidad de la Predicción", unsafe_allow_html=True)
-        st.write("Selecciona los parámetros y haz clic en **🔎 Explicar riesgo**. Verás el gráfico a la derecha junto a su leyenda.")
+        st.write(
+            "Selecciona los parámetros y haz clic en **🔎 Explicar riesgo**. Verás a la derecha la importancia global y, si SHAP está disponible, el gráfico local.")
 
         col_inputs, col_results = st.columns([1, 2], gap="large")
 
         with col_inputs:
             st.markdown("### 🔧 Parámetros de explicación")
-            heat = st.selectbox("Fuente de calor", list(HEAT_SOURC_MAP.keys()), key="ex1")
-            st.caption(f"📖 {HEAT_SOURC_MAP.get(heat, '')}")
+            heat = col_inputs.selectbox("Fuente de calor", list(HEAT_SOURC_MAP.keys()), key="ex1")
+            col_inputs.caption(f"📖 {HEAT_SOURC_MAP.get(heat, '')}")
 
-            mat = st.selectbox("Material combustible", list(TYPE_MAT_MAP.keys()), key="ex2")
-            st.caption(f"📖 {TYPE_MAT_MAP.get(mat, '')}")
+            mat = col_inputs.selectbox("Material combustible", list(TYPE_MAT_MAP.keys()), key="ex2")
+            col_inputs.caption(f"📖 {TYPE_MAT_MAP.get(mat, '')}")
 
-            struct = st.selectbox("Estado estructural", list(STRUC_STAT_MAP.keys()), key="ex3")
-            st.caption(f"📖 {STRUC_STAT_MAP.get(struct, '')}")
+            struct = col_inputs.selectbox("Estado estructural", list(STRUC_STAT_MAP.keys()), key="ex3")
+            col_inputs.caption(f"📖 {STRUC_STAT_MAP.get(struct, '')}")
 
-            det = st.selectbox("Detector presente", list(DETECTOR_MAP.keys()), key="ex4")
-            st.caption(f"📖 {DETECTOR_MAP.get(det, '')}")
+            det = col_inputs.selectbox("Detector presente", list(DETECTOR_MAP.keys()), key="ex4")
+            col_inputs.caption(f"📖 {DETECTOR_MAP.get(det, '')}")
 
-            dtype = st.selectbox("Tipo de detector", list(DET_TYPE_MAP.keys()), key="ex5")
-            st.caption(f"📖 {DET_TYPE_MAP.get(dtype, '')}")
+            dtype = col_inputs.selectbox("Tipo de detector", list(DET_TYPE_MAP.keys()), key="ex5")
+            col_inputs.caption(f"📖 {DET_TYPE_MAP.get(dtype, '')}")
 
-            area = st.slider("Superficie (m²)", 1, 10000, 100, key="ex6")
+            area = col_inputs.slider("Superficie (m²)", 1, 10000, 100, key="ex6")
 
-            explain = st.button("🔎 Explicar riesgo")
+            explain = col_inputs.button("🔎 Explicar riesgo")
 
         with col_results:
-            if explain:
+            if not explain:
+                col_results.info("Pulsa «🔎 Explicar riesgo» para ver la explicación aquí.")
+            else:
                 inputs_exp = {
                     "HEAT_SOURC": heat,
-                    "TYPE_MAT":   mat,
+                    "TYPE_MAT": mat,
                     "STRUC_STAT": struct,
-                    "DETECTOR":   det,
-                    "DET_TYPE":   dtype,
-                    "AREA":       area
+                    "DETECTOR": det,
+                    "DET_TYPE": dtype,
+                    "AREA": area
                 }
-                _, _, df_enc = predict(inputs_exp)
-                feat_imp = pd.Series(data=clf.feature_importances_, index=model_columns)\
-                             .sort_values(ascending=False).head(10)
+                ok, errores = validar_codigo(inputs_exp)
+                if not ok:
+                    for err in errores:
+                        col_results.error(err)
+                else:
+                    # 1) Importancia global
+                    feat_imp = pd.Series(clf.feature_importances_, index=model_columns) \
+                        .sort_values(ascending=False).head(10)
+                    col_results.markdown("### 📊 Importancia global (Random Forest)")
+                    col_results.bar_chart(feat_imp)
 
-                st.markdown("### 📊 Importancia de características (Random Forest)")
-                st.bar_chart(feat_imp)
-
-                st.markdown("**Leyenda de características:**")
-                for var_code, imp in feat_imp.items():
-                    var, code = var_code.split("_", 1)
-                    if var == "HEAT_SOURC":
-                        desc = HEAT_SOURC_MAP.get(code, code)
-                    elif var == "TYPE_MAT":
-                        desc = TYPE_MAT_MAP.get(code, code)
-                    elif var == "STRUC_STAT":
-                        desc = STRUC_STAT_MAP.get(code, code)
-                    elif var == "DETECTOR":
-                        desc = DETECTOR_MAP.get(code, code)
-                    elif var == "DET_TYPE":
-                        desc = DET_TYPE_MAP.get(code, code)
+                    # 2) Explicación local con SHAP
+                    if not SHAP_AVAILABLE:
+                        col_results.error("Instala `shap` y `matplotlib` para ver la explicación local.")
                     else:
-                        desc = code
-                    st.markdown(f"- **{var_code}**: {desc} (importancia {imp:.2f})")
-            else:
-                st.info("Pulsa «🔎 Explicar riesgo» para ver la explicación aquí.")
-
+                        # Preparamos la fila codificada
+                        _, _, df_enc = predict(inputs_exp)
+                        shap_values = explainer.shap_values(df_enc)
+                        col_results.markdown("### 🔍 Explicación local (SHAP)")
+                        # Bar chart SHAP
+                        fig, ax = plt.subplots()
+                        shap.plots.bar(shap_values, df_enc, show=False, ax=ax)
+                        col_results.pyplot(fig)
     # ─────────────────────────────────────────────────────────────────────────
     # Página: Ayuda
     # ─────────────────────────────────────────────────────────────────────────
@@ -417,9 +583,28 @@ def main():
         st.markdown("## <span class='emoji'>🔄</span> Retraining del Modelo", unsafe_allow_html=True)
         if st.button("Ejecutar Retraining"):
             with st.spinner("Entrenando..."):
-                import subprocess
-                subprocess.run(["python", "train_model.py"], check=True)
+                # Asumimos que train_model.py define:
+                # def retrain_and_return_test():
+                #     model, X_test, y_test = ...  # entrena, guarda modelo, y devuelve test
+                from train_model import retrain_and_return_test
+                model, X_test, y_test = retrain_and_return_test()
+
             st.success("Retraining completado.")
+
+            # Predicción sobre el conjunto de test
+            y_pred = model.predict(X_test)
+
+            # 1) Reporte de clasificación
+            report_dict = classification_report(y_test, y_pred, output_dict=True)
+            df_report = pd.DataFrame(report_dict).transpose()
+            st.markdown("#### 📋 Reporte de clasificación")
+            st.dataframe(df_report)
+
+            # 2) Matriz de confusión
+            cm = confusion_matrix(y_test, y_pred, labels=model.classes_)
+            df_cm = pd.DataFrame(cm, index=model.classes_, columns=model.classes_)
+            st.markdown("#### 🔢 Matriz de confusión")
+            st.table(df_cm)
 
 if __name__ == "__main__":
     main()

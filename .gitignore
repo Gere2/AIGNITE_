@@ -7,3 +7,5 @@ __pycache__/
 
 # Archivos de sistema macOS
 .DS_Store
+data/raw/fireincident.txt
+data/raw/fireincident.txt
