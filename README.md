@@ -15,6 +15,7 @@ cd aignite_
 python3 -m venv .venv            # (opcional, recomendado)
 source .venv/bin/activate        # Linux / macOS
 # o .venv\Scripts\activate       # Windows
+
 pip install -r requirements.txt
 🛠️ Uso
 
@@ -31,7 +32,7 @@ Evaluar
 Introduce parámetros: Fuente de calor, Material combustible (uno o varios), Estado, Detector, Tipo de detector, Área.
 Para múltiples materiales, las probabilidades se transforman con √(p) antes de promediar.
 Campo ID manual (opcional): si lo rellenas, detecta duplicados y evita sobrescribir.
-Guarda cada predicción en SQLite (incendios.db).
+Guarda cada predicción en SQLite (aignite.db).
 CRUD
 Consulta y elimina registros por su ID.
 Histórico
